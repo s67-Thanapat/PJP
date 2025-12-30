@@ -1,0 +1,6 @@
+
+SIZE 57 mm, 96 mm
+GAP 0 mm, 0 mm
+CLS
+BITMAP 0,0,60,96,0,receipt.bmp
+PRINT 1
