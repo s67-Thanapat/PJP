@@ -22,6 +22,10 @@ from PySide6.QtWidgets import QStyledItemDelegate
 def force_focus(widget):
     QTimer.singleShot(120, widget.setFocus)
 
+from PySide6.QtCore import QTimer
+
+
+
 class ComboPlaceholderDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         text = index.data()
@@ -144,44 +148,120 @@ class ImportTab(QWidget):
 
         # โหลดแถวค้างไว้
         self.load_pending_rows()
+        # 🔒 flag กัน save ตอนโหลดข้อมูล
+        self._loading = False
 
     def safe_focus_barcode(self):
         """รอให้ editor ถูกปิดก่อน แล้วค่อย focus ช่องบาร์โค้ด"""
         QTimer.singleShot(50, lambda: self.input_barcode.setFocus())
 
+    def schedule_save(self):
+        # ❌ ห้าม save ระหว่าง load
+        if getattr(self, "_loading_pending", False):
+            return
+
+        if not hasattr(self, "_save_timer"):
+            self._save_timer = QTimer(self)
+            self._save_timer.setSingleShot(True)
+            self._save_timer.timeout.connect(self.save_pending_rows)
+
+        self._save_timer.start(300)  # debounce 300ms
 
     # ----------------------------------------------------------
     # เติมข้อมูลจาก stock เดิมอัตโนมัติ (ถ้ามีใน DB)
     # ----------------------------------------------------------
+    # ----------------------------------------------------------
+    # เติมข้อมูลจาก stock เดิมอัตโนมัติ (ถ้ามีใน DB)
+    # ----------------------------------------------------------
+    # ----------------------------------------------------------
+    # เติมข้อมูลจาก stock เดิมอัตโนมัติ (แก้ไขดึงราคา + ทุน)
+    # ----------------------------------------------------------
     def auto_fill_product(self, row):
-        code_item = self.add_table.item(row, 1)
-        if not code_item:
+        # 1. ดึงบาร์โค้ดจากตาราง
+        item_code = self.add_table.item(row, 1)
+        if not item_code:
             return
 
-        code = code_item.text().strip()
+        code = item_code.text().strip()
         if not code:
             return
 
+        # 2. ดึงข้อมูลจาก Database
         product = get_product(code)
+        
+        # --- DEBUG ---
+        print(f"🔍 CHECK DB Row {row}: {product}") 
+
         if not product:
             return
 
-        # DB คืนค่า 7 ช่อง
-        barcode, name, price, cost, qty, main_cat, sub_cat = product
+        try:
+            # map ข้อมูล (0=barcode, 1=name, 2=price, 3=cost, ...)
+            db_name = product[1]
+            db_price = product[2]
+            db_cost = product[3]
+            db_main = product[5]
+            db_sub = product[6]
+        except Exception as e:
+            print(f"❌ Error Mapping Data: {e}")
+            return
 
+        # ==========================================
+        # 3. ใส่ชื่อ (Column 2) [จัดกึ่งกลาง]
+        # ==========================================
+        item_name = self.add_table.item(row, 2)
+        if item_name is None:
+            item_name = QTableWidgetItem()
+            item_name.setTextAlignment(Qt.AlignCenter) # จัดกึ่งกลาง
+            self.add_table.setItem(row, 2, item_name)
+        
+        if db_name:
+            item_name.setText(str(db_name))
+            item_name.setTextAlignment(Qt.AlignCenter) # ย้ำกึ่งกลาง
 
-        if name and not self.add_table.item(row, 2).text().strip():
-            self.add_table.item(row, 2).setText(name)
+        # ==========================================
+        # 4. ใส่ราคาขาย (Column 3) [จัดกึ่งกลาง]
+        # ==========================================
+        try:
+            val_price = float(db_price) if db_price is not None else 0.0
+            str_price = f"{val_price:g}"
+            
+            new_item_price = QTableWidgetItem(str_price)
+            new_item_price.setTextAlignment(Qt.AlignCenter) # จัดกึ่งกลาง
+            self.add_table.setItem(row, 3, new_item_price)
+            
+        except Exception as e:
+            print(f"❌ Error Set Price: {e}")
 
-        if price and not self.add_table.item(row, 3).text().strip():
-            self.add_table.item(row, 3).setText(str(price))
+        # ==========================================
+        # 5. ใส่ราคาทุน (Column 4) [จัดกึ่งกลาง]
+        # ==========================================
+        try:
+            val_cost = float(db_cost) if db_cost is not None else 0.0
+            str_cost = f"{val_cost:g}"
 
-        if cost and not self.add_table.item(row, 4).text().strip():
-            self.add_table.item(row, 4).setText(str(cost))
+            new_item_cost = QTableWidgetItem(str_cost)
+            new_item_cost.setTextAlignment(Qt.AlignCenter) # จัดกึ่งกลาง
+            self.add_table.setItem(row, 4, new_item_cost)
+            
+        except Exception as e:
+             print(f"❌ Error Set Cost: {e}")
 
+        # ==========================================
+        # 6. ใส่หมวดหมู่ (Dropdown)
+        # ==========================================
         combo_main = self.add_table.cellWidget(row, 6)
-        if main_cat:
-            combo_main.setCurrentText(main_cat)
+        if combo_main and db_main:
+            combo_main.setCurrentText(str(db_main))
+            # ถ้ามีหมวดย่อย ให้หน่วงเวลาตั้งค่านิดนึง
+            if db_sub:
+                QTimer.singleShot(100, lambda: self._set_sub_cat_delayed(row, str(db_sub)))
+
+    def _set_sub_cat_delayed(self, row, sub_name):
+        combo_sub = self.add_table.cellWidget(row, 7)
+        if combo_sub:
+            combo_sub.setCurrentText(sub_name)
+
 
         # ----------------------------------------------------------
     # Refresh จาก StockTab (เมื่อสต็อกเซฟ)
@@ -672,7 +752,8 @@ class ImportTab(QWidget):
         self.refresh_delete_button_rows()
         self.renumber_ids()
 
-        self.save_pending_rows()
+        self.schedule_save()
+
         force_focus(self.input_barcode)
 
 
@@ -1015,13 +1096,23 @@ class ImportTab(QWidget):
         if row < self.add_table.rowCount():
             self.add_table.removeRow(row)
         self.renumber_ids()
-        self.save_pending_rows()
+        self.schedule_save()
+
         force_focus(self.input_barcode)
 
 
     def clear_all(self):
+        # 1. ล้างตารางหน้าจอ
         self.add_table.setRowCount(0)
-        self.save_pending_rows()
+
+        # 2. 🔥 ลบไฟล์ Temp ทิ้งทันที (สำคัญ! เพื่อไม่ให้ข้อมูลผีโผล่มาอีก)
+        if os.path.exists(TEMP_FILE):
+            try:
+                os.remove(TEMP_FILE)
+            except:
+                pass
+
+        # 3. โฟกัสกลับไปช่องบาร์โค้ด
         force_focus(self.input_barcode)
 
 
@@ -1033,7 +1124,8 @@ class ImportTab(QWidget):
         qty = int(item.text() or "0") + diff
         qty = max(1, qty)
         item.setText(str(qty))
-        self.save_pending_rows()
+        self.schedule_save()
+
         # ⭐ Force Focus
         force_focus(self.input_barcode)
 
@@ -1072,7 +1164,8 @@ class ImportTab(QWidget):
             if bc_item and bc_item.text() == code:
                 qty_item = self.add_table.item(r, 5)
                 qty_item.setText(str(int(qty_item.text() or "0") + 1))
-                self.save_pending_rows()
+                self.schedule_save()
+
                 force_focus(self.input_barcode)
 
                 return
@@ -1108,7 +1201,8 @@ class ImportTab(QWidget):
             self.add_table.item(row, 4).setText("0")
             self.add_table.item(row, 5).setText("1")
 
-        self.save_pending_rows()
+        self.schedule_save()
+
         force_focus(self.input_barcode)
 
 
@@ -1140,214 +1234,219 @@ class ImportTab(QWidget):
     # บันทึกลงฐานข้อมูล + ล้าง pending
     # ----------------------------------------------------------
     def save_all_products(self):
-        rows = self.add_table.rowCount()
-        saved = 0
+        row_count = self.add_table.rowCount()
+        
+        if row_count == 0:
+            QMessageBox.warning(self, "แจ้งเตือน", "ไม่มีข้อมูลสินค้าในตาราง")
+            return
 
-        for r in range(rows):
-            code_item = self.add_table.item(r, 1)
-            if not code_item:
-                continue
-            code = code_item.text().strip()
+        # ถามยืนยันก่อนบันทึก
+        confirm = QMessageBox.question(
+            self, "ยืนยัน", 
+            f"ต้องการบันทึกสินค้า {row_count} รายการหรือไม่?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if confirm != QMessageBox.Yes:
+            return
 
-            name_item = self.add_table.item(r, 2)
-            name = name_item.text().strip() if name_item else ""
+        saved_count = 0
+        error_count = 0
+        error_messages = []
 
-            # validate ชื่อ
-            if not name:
-                if name_item:
-                    name_item.setData(Qt.UserRole, "error")
-                QMessageBox.warning(
-                    self, "ข้อมูลไม่ครบ",
-                    f"แถวที่ {r+1} โปรดใส่ชื่อสินค้า"
-                )
-                self.add_table.setCurrentCell(r, 2)
-                if name_item:
-                    self.add_table.editItem(name_item)
-                return
+        # วนลูปทุกแถวในตาราง
+        for row in range(row_count):
+            try:
+                # --- 1. ดึงข้อมูล ---
+                item_code = self.add_table.item(row, 1)
+                barcode = item_code.text().strip() if item_code else ""
 
-            if name_item:
-                name_item.setData(Qt.UserRole, None)
+                item_name = self.add_table.item(row, 2)
+                name = item_name.text().strip() if item_name else ""
 
-            price = float(self.add_table.item(r, 3).text() or 0)
-            cost  = float(self.add_table.item(r, 4).text() or 0)
-            qty   = int(self.add_table.item(r, 5).text() or 0)
+                item_price = self.add_table.item(row, 3)
+                price_text = item_price.text().strip() if item_price else "0"
+                price = float(price_text) if price_text else 0.0
 
-            combo_main = self.add_table.cellWidget(r, 6)
-            combo_sub  = self.add_table.cellWidget(r, 7)
+                item_cost = self.add_table.item(row, 4)
+                cost_text = item_cost.text().strip() if item_cost else "0"
+                cost = float(cost_text) if cost_text else 0.0
 
-            # ----- หมวดหลัก -----
-            if combo_main:
-                main_text = (combo_main.currentText() or "").strip()
-                main_index = combo_main.currentIndex()
-            else:
-                main_text = ""
-                main_index = -1
+                item_qty = self.add_table.item(row, 5)
+                qty_text = item_qty.text().strip() if item_qty else "1"
+                qty = int(float(qty_text)) if qty_text else 1
 
-            main_cat = (
-                main_text
-                if main_text and not main_text.startswith(("เลือก", "กรุณา", "➕")) and main_index != -1
-                else "ไม่มีหมวดหมู่"
-            )
+                # ดึงหมวดหมู่
+                combo_main = self.add_table.cellWidget(row, 6)
+                main_cat = combo_main.currentText()
+                if main_cat in ["เลือกหมวดหลัก", "เลือกหมวดหมู่", "➕ เพิ่มหมวดหลัก"]:
+                    main_cat = "ไม่มีหมวดหมู่"
 
-            # ----- หมวดย่อย -----
-            if combo_sub:
-                sub_text = (combo_sub.currentText() or "").strip()
-                sub_index = combo_sub.currentIndex()
-            else:
-                sub_text = ""
-                sub_index = -1
+                combo_sub = self.add_table.cellWidget(row, 7)
+                sub_cat = combo_sub.currentText()
+                if sub_cat in ["เลือกหมวดย่อย", "➕ เพิ่มหมวดย่อย"]:
+                    sub_cat = "-"
 
-            sub_cat = (
-                sub_text
-                if sub_text and not sub_text.startswith(("เลือก", "กรุณา", "➕")) and sub_index != -1
-                else "ไม่มีหมวดย่อย"
-            )
+                # --- 2. Validation ---
+                if not barcode:
+                    error_messages.append(f"แถวที่ {row+1}: ไม่มีบาร์โค้ด")
+                    error_count += 1
+                    continue
+                
+                if not name:
+                    error_messages.append(f"แถวที่ {row+1}: ไม่มีชื่อสินค้า")
+                    error_count += 1
+                    continue
 
-            # --------- เซฟลง DB ---------
-            add_product(code, name, price, cost, qty, main_cat, sub_cat)
+                # --- 3. บันทึกลง DB ---
+                success = add_product(barcode, name, price, cost, qty, main_cat, sub_cat)
+                
+                if success:
+                    saved_count += 1
+                else:
+                    error_messages.append(f"แถวที่ {row+1}: บันทึกไม่สำเร็จ (บาร์โค้ดอาจซ้ำ)")
+                    error_count += 1
 
-            from db import add_history
-            add_history(code, name, qty, cost, price)
+            except Exception as e:
+                print(f"Error saving row {row}: {e}")
+                error_messages.append(f"แถวที่ {row+1}: Error ({str(e)})")
+                error_count += 1
 
-            saved += 1
+        # --- 4. สรุปผล ---
+        if error_count > 0:
+            summary = f"บันทึกสำเร็จ: {saved_count}\nไม่สำเร็จ: {error_count}"
+            details = "\n".join(error_messages[:5])
+            if len(error_messages) > 5: details += "\n..."
+            QMessageBox.warning(self, "บันทึกเสร็จสิ้น (มีข้อผิดพลาด)", f"{summary}\n\nรายละเอียด:\n{details}")
+        else:
+            QMessageBox.information(self, "สำเร็จ", f"บันทึกสินค้า {saved_count} รายการเรียบร้อยแล้ว!")
 
-        # ====== หลังจากบันทึกครบทุกแถว ======
-        QMessageBox.information(self, "สำเร็จ", f"เพิ่มสินค้าแล้ว {saved} รายการ")
-
-        self.add_table.setRowCount(0)
-        if os.path.exists(TEMP_FILE):
-            os.remove(TEMP_FILE)
-
-        try:
-            self.app.history_tab.refresh_now()
-        except:
-            pass
-
-        force_focus(self.input_barcode)
-
-
+        # --- 5. เคลียร์ตารางและไฟล์ทิ้ง (ถ้าไม่มี Error) ---
+        if saved_count > 0 and error_count == 0:
+            self.clear_all()  # เรียกฟังก์ชัน clear_all ที่แก้แล้วด้านบน
+        
+        # กรณีมี error บางรายการ จะไม่เคลียร์ เพื่อให้ user แก้ไขรายการที่ผิด
     
 
     # ----------------------------------------------------------
     # Auto-save: เก็บแถวค้างไว้ในไฟล์
     # ----------------------------------------------------------
     def save_pending_rows(self):
-        rows = []
+        if getattr(self, "_loading_pending", False):
+            return
 
-        for r in range(self.add_table.rowCount()):
-            bc = self.add_table.item(r, 1).text().strip()   # barcode
-            name = self.add_table.item(r, 2).text().strip()  # name
-            qty = self.add_table.item(r, 5).text().strip()   # qty
+        rows_data = []
+        row_count = self.add_table.rowCount()
 
-            if not (bc or name or qty or 
-                    self.add_table.cellWidget(r, 6).currentText() or 
-                    self.add_table.cellWidget(r, 7).currentText()):
+        for r in range(row_count):
+            def text(col):
+                item = self.add_table.item(r, col)
+                return item.text().strip() if item else ""
+
+            bc   = text(1)
+            name = text(2)
+            qty  = text(5)
+
+            combo_main = self.add_table.cellWidget(r, 6)
+            combo_sub  = self.add_table.cellWidget(r, 7)
+
+            main = combo_main.currentText().strip() if combo_main and combo_main.currentIndex() >= 0 else ""
+            sub  = combo_sub.currentText().strip() if combo_sub and combo_sub.currentIndex() >= 0 else ""
+
+            # ข้ามเฉพาะแถวที่ว่าง 100%
+            if not any([bc, name, qty, main, sub]):
                 continue
 
-
-            row_data = {
-                "barcode": bc,
+            rows_data.append({
+                "barcode": bc if bc else "nan",
                 "name": name,
-                "price": self.add_table.item(r, 3).text(),
-                "cost": self.add_table.item(r, 4).text(),
-                "qty": qty,
-                "main": self.add_table.cellWidget(r, 6).currentText(),
-                "sub": self.add_table.cellWidget(r, 7).currentText()
-            }
-            rows.append(row_data)
+                "price": text(3) or "0",
+                "cost":  text(4) or "0",
+                "qty":   qty or "1",
+                "main":  main,
+                "sub":   sub
+            })
+
+        if not rows_data:
+            print("SKIP SAVE (no rows)")
+            return
 
         with open(TEMP_FILE, "w", encoding="utf8") as f:
-            json.dump(rows, f, ensure_ascii=False, indent=2)
+            json.dump(rows_data, f, ensure_ascii=False, indent=2)
+
+        print("SAVE ROWS:", len(rows_data))
+
 
     # ----------------------------------------------------------
     # โหลดแถวค้างจากไฟล์
     # ----------------------------------------------------------
     def load_pending_rows(self):
+        self._loading = True     # 🔒 เริ่มโหลด (ห้าม save)
+
+        self._block_save = True  # (ถ้ามีอยู่แล้ว ยิ่งดี)
         if not os.path.exists(TEMP_FILE):
             return
 
+        self._loading_pending = True  # 🔒 lock save
+
         try:
-            data = json.load(open(TEMP_FILE, "r", encoding="utf8"))
+            with open(TEMP_FILE, "r", encoding="utf8") as f:
+                data = json.load(f)
         except:
+            self._loading_pending = False
             return
 
-        # ⭐ รวมข้อมูลตาม barcode (ตัวสุดท้ายชนะ)
-        merged = {}
-        for item in data:
-            bc = item.get("barcode", "")
-
-            # ⭐ เก็บแถวว่างไว้ด้วย (ไม่ข้าม)
-            if bc:
-                key = bc
-            else:
-                key = f"empty_{len(merged)}"
-
-            merged[key] = item
-
-        # ⭐ รวมกับข้อมูลล่าสุดจากสต็อก
-        merged = self.merge_with_stock(merged)
+        if not isinstance(data, list):
+            self._loading_pending = False
+            return
 
         self.add_table.setRowCount(0)
 
         from db import get_subcategories
 
-        for bc, item in merged.items():
+        for item in data:
             self.add_row()
             row = self.add_table.rowCount() - 1
 
-            # ---------- เติมคอลัมน์พื้นฐาน ----------
-            self.add_table.item(row, 1).setText(item.get("barcode", ""))
-            self.add_table.item(row, 2).setText(item.get("name", ""))
-            self.add_table.item(row, 3).setText(str(item.get("price", 0) or 0))
-            self.add_table.item(row, 4).setText(str(item.get("cost", 0) or 0))
-            self.add_table.item(row, 5).setText(str(item.get("qty", 1) or 1))
+            barcode = item.get("barcode", "")
+            if str(barcode).lower() == "nan":
+                barcode = ""
 
-            main = (item.get("main", "") or "").strip()
-            sub  = (item.get("sub", "") or "").strip()
+            self.add_table.item(row, 1).setText(barcode)
+            self.add_table.item(row, 2).setText(item.get("name", ""))
+            self.add_table.item(row, 3).setText(str(item.get("price", 0)))
+            self.add_table.item(row, 4).setText(str(item.get("cost", 0)))
+            self.add_table.item(row, 5).setText(str(item.get("qty", 1)))
+
+            main = (item.get("main") or "").strip()
+            sub  = (item.get("sub") or "").strip()
 
             combo_main = self.add_table.cellWidget(row, 6)
             combo_sub  = self.add_table.cellWidget(row, 7)
 
-            # ---------- หมวดหลัก ----------
+            # main
             combo_main.blockSignals(True)
-
-            # ถ้า main เป็น "ไม่มีหมวดหมู่" หรือค่าว่าง → ให้แสดง placeholder "เลือกหมวดหมู่"
-            if (not main) or (main == "ไม่มีหมวดหมู่"):
-                combo_main.setCurrentIndex(-1)   # ⭐ ให้ placeholder ทำงาน
+            if main and main in self.category_list:
+                combo_main.setCurrentText(main)
             else:
-                if main in self.category_list:
-                    combo_main.setCurrentText(main)
-                else:
-                    # ถ้าเจอหมวดเก่าที่ไม่มีใน list แล้ว → แทรกเข้าไป
-                    combo_main.insertItem(combo_main.count() - 1, main)
-                    combo_main.setCurrentText(main)
-
+                combo_main.setCurrentIndex(-1)
             combo_main.blockSignals(False)
 
-            # ---------- หมวดย่อย ----------
-            # ถ้าไม่มีหมวดหลักจริง ๆ หรือเป็น "ไม่มีหมวดหมู่" → ไม่มีหมวดย่อย
-            effective_main = "" if (not main or main == "ไม่มีหมวดหมู่") else main
-            subs = get_subcategories(effective_main) if effective_main else []
-
+            # sub
+            subs = get_subcategories(main) if main else []
             combo_sub.blockSignals(True)
             combo_sub.clear()
             combo_sub.addItems(subs)
             combo_sub.addItem("➕ เพิ่มหมวดย่อย")
 
-            # ถ้า sub เป็น "ไม่มีหมวดย่อย" หรือว่าง → ไม่เลือกอะไร (placeholder)
-            if (not sub) or (sub == "ไม่มีหมวดย่อย"):
-                combo_sub.setCurrentIndex(-1)
+            if sub in subs:
+                combo_sub.setCurrentText(sub)
             else:
-                if sub in subs:
-                    combo_sub.setCurrentText(sub)
-                else:
-                    # ถ้ามีหมวดย่อยที่ไม่อยู่ใน DB แล้ว → แทรกไว้ด้านบน
-                    combo_sub.insertItem(0, sub)
-                    combo_sub.setCurrentText(sub)
-
+                combo_sub.setCurrentIndex(-1)
             combo_sub.blockSignals(False)
 
         self.renumber_ids()
+        self._loading_pending = False  # 🔓 unlock
+
 
 
     def merge_with_stock(self, merged_rows):
@@ -1433,7 +1532,132 @@ class ImportTab(QWidget):
         self.alias_window = AliasSettingWindow(self)
         self.alias_window.exec()
         force_focus(self.input_barcode)
+    
+    # ----------------------------------------------------------
+    # 🔥 ฟังก์ชันรับค่าจากช่อง Input (แก้ไขใหม่)
+    # ----------------------------------------------------------
+    def add_from_input(self):
+        """รับค่าจากบาร์โค้ด เช็คซ้ำ ถ้าซ้ำบวกจำนวน ถ้าไม่ซ้ำเพิ่มแถว"""
+        text = self.input_barcode.text().strip()
+        if not text:
+            return
 
+        # แปลงแป้นพิมพ์ไทยเป็นอังกฤษ (เผื่อลืมสลับภาษา)
+        barcode = self.convert_thai_keyboard_barcode(text)
+
+        # 1. วนลูปเช็คว่ามีบาร์โค้ดนี้ในตารางหรือยัง
+        rows = self.add_table.rowCount()
+        for r in range(rows):
+            item_code = self.add_table.item(r, 1) # คอลัมน์ 1 คือบาร์โค้ด
+            if item_code and item_code.text().strip() == barcode:
+                # === เจอของเดิม! บวกจำนวนเพิ่ม ===
+                item_qty = self.add_table.item(r, 5) # คอลัมน์ 5 คือจำนวน
+                current_qty = 0
+                try:
+                    current_qty = int(item_qty.text())
+                except ValueError:
+                    current_qty = 0
+                
+                # บวกเพิ่ม 1 (หรือตามจำนวนที่ต้องการ)
+                new_qty = current_qty + 1
+                item_qty.setText(str(new_qty))
+
+                # Highlight แถวนั้นให้รู้ว่าอัปเดตแล้ว
+                self.add_table.selectRow(r)
+                self.add_table.scrollToItem(item_qty)
+                
+                # เคลียร์ช่องและบันทึก
+                self.input_barcode.clear()
+                self.schedule_save()
+                return  # ⛔ จบฟังก์ชันเลย ไม่ต้องไปสร้างแถวใหม่
+
+        # 2. ถ้าไม่เจอของเดิม ให้เพิ่มแถวใหม่
+        self.add_row(barcode_val=barcode)
+        self.input_barcode.clear()
+
+    # ----------------------------------------------------------
+    # 🔥 ฟังก์ชันเพิ่มแถวใหม่ (รองรับการรับค่าบาร์โค้ดมาเลย)
+    # ----------------------------------------------------------
+    def add_row(self, barcode_val=""):
+        row = self.add_table.rowCount()
+        self.add_table.insertRow(row)
+        self.add_table.setRowHeight(row, 60) # ความสูงแถว
+
+        # --- 0. ID (ลำดับ) ---
+        item_id = QTableWidgetItem(str(row + 1))
+        item_id.setFlags(Qt.ItemIsEnabled) # ห้ามแก้
+        item_id.setTextAlignment(Qt.AlignCenter)
+        self.add_table.setItem(row, 0, item_id)
+
+        # --- 1. Barcode ---
+        item_code = QTableWidgetItem(barcode_val)
+        item_code.setTextAlignment(Qt.AlignCenter)
+        self.add_table.setItem(row, 1, item_code)
+
+        # --- 2. Name (ชื่อสินค้า) ---
+        item_name = QTableWidgetItem("")
+        self.add_table.setItem(row, 2, item_name)
+
+        # --- 3. Price (ราคาขาย) ---
+        item_price = QTableWidgetItem("0")
+        item_price.setTextAlignment(Qt.AlignCenter)
+        self.add_table.setItem(row, 3, item_price)
+
+        # --- 4. Cost (ทุน) ---
+        item_cost = QTableWidgetItem("0")
+        item_cost.setTextAlignment(Qt.AlignCenter)
+        self.add_table.setItem(row, 4, item_cost)
+
+        # --- 5. Qty (จำนวน) ---
+        # เริ่มต้นเป็น 1 เสมอเมื่อเพิ่มแถวใหม่
+        item_qty = QTableWidgetItem("1")
+        item_qty.setTextAlignment(Qt.AlignCenter)
+        self.add_table.setItem(row, 5, item_qty)
+
+        # --- 6. Main Category (Combobox) ---
+        combo_main = self.create_main_category_box(row)
+        self.add_table.setCellWidget(row, 6, combo_main)
+
+        # --- 7. Sub Category (Combobox) ---
+        combo_sub = self.create_sub_category_box(row)
+        self.add_table.setCellWidget(row, 7, combo_sub)
+
+        # --- 8. Controls (ปุ่มจัดการ) ---
+        btn_widget = self.create_control_buttons(row)
+        self.add_table.setCellWidget(row, 8, btn_widget)
+
+        # --- Auto Fill: ถ้ามีในระบบ ให้ดึงชื่อ/ราคา/หมวด มาใส่เลย ---
+        if barcode_val:
+            self.auto_fill_product(row)
+
+        # --- Auto Category: ถ้าล็อคหมวดไว้ ให้เลือกเลย ---
+        if self.auto_main_mode and self.locked_main_category:
+            combo_main.setCurrentText(self.locked_main_category)
+        
+        if self.auto_sub_mode and self.locked_sub_category:
+            # ต้องรอให้ Main เลือกเสร็จก่อน Sub ถึงจะมีรายการให้เลือก
+            # (Logic นี้อาจต้องปรับตามการทำงานของ Combo คุณ)
+             QTimer.singleShot(50, lambda: combo_sub.setCurrentText(self.locked_sub_category))
+
+        # Scroll ไปหาแถวใหม่
+        self.add_table.scrollToBottom()
+        self.schedule_save()
+    
+    # ฟังก์ชันช่วยปรับจำนวน (ใช้กับปุ่ม + / - ในตาราง)
+    def adjust_qty(self, row, amount):
+        item = self.add_table.item(row, 5)
+        if not item: return
+        try:
+            val = int(item.text())
+        except:
+            val = 0
+        
+        new_val = val + amount
+        if new_val < 1: new_val = 1 # ห้ามต่ำกว่า 1
+        
+        item.setText(str(new_val))
+        self.schedule_save()
+        force_focus(self.input_barcode)
 
     # ----------------------------------------------------------
     # Scanner event (ยิงบาร์โค้ดช่วงที่ focus ไม่อยู่ที่ input)

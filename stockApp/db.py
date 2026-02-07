@@ -150,33 +150,45 @@ def get_categories():
 # 🔥 เพิ่มสินค้า
 # ===========================================================
 def add_product(barcode, name, price, cost, qty, main_cat="", sub_cat=""):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    cur.execute("""
-        INSERT INTO products (
-            barcode, name, price, cost, qty,
-            main_category, sub_category, created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(barcode) DO UPDATE SET
-            name = excluded.name,
-            price = excluded.price,
-            cost = excluded.cost,
-            qty = products.qty + excluded.qty,
-            main_category = excluded.main_category,
-            sub_category = excluded.sub_category,
-            created_at = CASE
-                WHEN products.created_at IS NULL
-                     OR products.created_at = ''
-                THEN excluded.created_at
-                ELSE products.created_at
-            END
-    """, (barcode, name, price, cost, qty, main_cat, sub_cat, now))
+        # ใช้คำสั่ง SQL แบบเดิมของคุณ (ON CONFLICT DO UPDATE) ซึ่งดีอยู่แล้ว
+        cur.execute("""
+            INSERT INTO products (
+                barcode, name, price, cost, qty,
+                main_category, sub_category, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(barcode) DO UPDATE SET
+                name = excluded.name,
+                price = excluded.price,
+                cost = excluded.cost,
+                qty = products.qty + excluded.qty,
+                main_category = excluded.main_category,
+                sub_category = excluded.sub_category,
+                created_at = CASE
+                    WHEN products.created_at IS NULL
+                         OR products.created_at = ''
+                    THEN excluded.created_at
+                    ELSE products.created_at
+                END
+        """, (barcode, name, price, cost, qty, main_cat, sub_cat, now))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
+        
+        return True  # ✅ เพิ่มบรรทัดนี้: บอกโปรแกรมว่า "บันทึกสำเร็จ"
+
+    except Exception as e:
+        print(f"Error adding product: {e}")
+        try:
+            conn.close()
+        except:
+            pass
+        return False # ❌ ถ้ามี Error จริงๆ ให้ส่ง False กลับไป
 
 
 
